@@ -8,42 +8,41 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // =====================
-// Invidious instances (ordered by reliability)
+// Invidious instances
 // =====================
 const INSTANCES = [
+  "https://inv.nadeko.net",
   "https://yewtu.be",
   "https://invidious.nerdvpn.de",
-  "https://invidious.projectsegfau.lt",
-  "https://inv.bp.projectsegfau.lt",
-  "https://invidious.fdn.fr"
+  "https://invidious.privacydev.net",
+  "https://invidious.kavin.rocks",
+  "https://invidious-us.kavin.rocks"
 ];
 
 let activeInstance = null;
 let instanceCheckTime = 0;
-const INSTANCE_TTL = 5 * 60 * 1000; // re-check every 5 minutes
+const INSTANCE_TTL = 3 * 60 * 1000; // re-check every 3 minutes
 
-// =====================
-// CORS — allow browser requests from any origin (localhost or file://)
-// =====================
 app.use(cors());
-
-// =====================
-// Serve static frontend files
-// =====================
 app.use(express.static(path.join(__dirname, "public")));
 
 // =====================
-// Helper: fetch from a URL with timeout
+// Helper: HTTP/HTTPS fetch with timeout
 // =====================
-function fetchUrl(url, timeoutMs = 6000) {
+function fetchUrl(url, timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
     const lib = url.startsWith("https") ? https : http;
     const req = lib.get(url, {
       headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; YTProxy/1.0)",
-        "Accept": "application/json"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9"
       }
     }, (res) => {
+      // Follow redirects
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return fetchUrl(res.headers.location, timeoutMs).then(resolve).catch(reject);
+      }
       let data = "";
       res.on("data", chunk => (data += chunk));
       res.on("end", () => {
@@ -63,7 +62,7 @@ function fetchUrl(url, timeoutMs = 6000) {
 }
 
 // =====================
-// Pick a working Invidious instance
+// Pick a working instance
 // =====================
 async function getActiveInstance() {
   const now = Date.now();
@@ -71,49 +70,44 @@ async function getActiveInstance() {
     return activeInstance;
   }
 
-  console.log("🔍 Checking Invidious instances...");
+  console.log("🔍 Finding working Invidious instance...");
   for (const inst of INSTANCES) {
     try {
-      const result = await fetchUrl(`${inst}/api/v1/trending?page=1`, 5000);
-      JSON.parse(result.text); // make sure it's valid JSON
-      activeInstance = inst;
-      instanceCheckTime = now;
-      console.log(`✅ Using instance: ${inst}`);
-      return inst;
+      // Use /api/v1/stats which is lighter than trending
+      const result = await fetchUrl(`${inst}/api/v1/stats`, 6000);
+      const json = JSON.parse(result.text);
+      if (json) {
+        activeInstance = inst;
+        instanceCheckTime = now;
+        console.log(`✅ Using: ${inst}`);
+        return inst;
+      }
     } catch (e) {
       console.log(`❌ ${inst} — ${e.message}`);
     }
   }
-
   throw new Error("All Invidious instances are currently unavailable.");
 }
 
 // =====================
-// Proxy middleware
+// Proxy all /api/* requests
 // =====================
-async function proxy(req, res) {
+app.get("/api/*", async (req, res) => {
   try {
     const instance = await getActiveInstance();
-
-    // Build the path: strip /api prefix that the frontend uses
-    const apiPath = req.originalUrl; // e.g. /api/v1/trending?page=1
-    const url = instance + apiPath;
-
+    const url = instance + req.originalUrl;
     console.log(`→ ${url}`);
-    const result = await fetchUrl(url);
-
+    const result = await fetchUrl(url, 10000);
     res.setHeader("Content-Type", "application/json");
+    res.setHeader("X-Proxied-From", instance);
     res.send(result.text);
   } catch (e) {
     console.error("Proxy error:", e.message);
+    // Reset active instance so next request retries
+    activeInstance = null;
     res.status(502).json({ error: e.message });
   }
-}
-
-// =====================
-// Routes — proxy all /api/* requests to Invidious
-// =====================
-app.get("/api/*", proxy);
+});
 
 // =====================
 // Health check
@@ -131,9 +125,6 @@ app.get("/health", async (req, res) => {
 // Start
 // =====================
 app.listen(PORT, () => {
-  console.log(`\n🚀 YT Proxy running at http://localhost:${PORT}`);
-  console.log(`📁 Serving frontend from: ${path.join(__dirname, "public")}`);
-  console.log(`🔗 Open http://localhost:${PORT} in your browser\n`);
-  // Pre-warm instance selection
-  getActiveInstance().catch(() => {});
+  console.log(`\n🚀 YT Proxy running on port ${PORT}`);
+  getActiveInstance().catch(e => console.error("Startup instance check failed:", e.message));
 });
